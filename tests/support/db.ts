@@ -1,16 +1,45 @@
 import { createHash } from "node:crypto";
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { migrate } from "drizzle-orm/pglite/migrator";
 import { afterAll } from "vitest";
-import { createDatabase, type Db } from "@/db/client";
+import { MIGRATIONS_FOLDER, type Db } from "@/db/client";
+import * as schema from "@/db/schema";
 import { createCustomer, createProduct, type Actor } from "@/lib/catalog";
 import { createLicense } from "@/lib/licenses";
 import type { MachineIds } from "@/lib/machine";
 
 export const actor: Actor = { email: "support@example.com", ip: "203.0.113.1" };
 
+type Query = PGlite["query"];
+
+// In production, drizzle's postgres.js driver passes values in raw sql``
+// templates to the database unconverted, and a JavaScript Date then fails
+// (only typed comparisons such as lt(column, date) convert it). PGlite would
+// accept it, so the test database refuses it the same way production does.
+function rejectRawDates(query: Query): Query {
+  return ((text: string, params?: unknown[], options?: unknown) => {
+    if (params?.some((value) => value instanceof Date)) {
+      throw new Error(`A Date was passed into raw SQL (fails in production): ${text}`);
+    }
+    return query(text, params, options as never);
+  }) as Query;
+}
+
 /** A fresh in-memory database, migrated, closed after the test file. */
 export async function testDb(): Promise<Db> {
-  const { db, close } = await createDatabase("pglite:memory");
-  afterAll(close);
+  const client = new PGlite();
+  const query = client.query.bind(client);
+  const transaction = client.transaction.bind(client);
+  client.query = rejectRawDates(query);
+  client.transaction = ((callback: (tx: { query: Query }) => Promise<unknown>) =>
+    transaction((tx) => {
+      tx.query = rejectRawDates(tx.query.bind(tx));
+      return callback(tx);
+    })) as PGlite["transaction"];
+  const db = drizzle({ client, schema });
+  await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+  afterAll(() => client.close());
   return db;
 }
 

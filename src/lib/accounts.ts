@@ -1,6 +1,6 @@
 import "server-only";
 import { timingSafeEqual } from "node:crypto";
-import { and, count, eq, gt, ne, sql } from "drizzle-orm";
+import { and, count, eq, gt, lt, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "@/db/client";
 import { passwordResets, sessions, users, type Role } from "@/db/schema";
@@ -174,8 +174,10 @@ export async function createSession(
     ip: context.ip,
     userAgent: context.userAgent?.slice(0, 300) ?? null,
   });
-  // Housekeeping: expired sessions are useless.
-  await db.delete(sessions).where(and(eq(sessions.userId, userId), sql`${sessions.expiresAt} < ${now}`));
+  // Housekeeping: expired sessions are useless. A typed comparison, not a raw
+  // sql`` template: Postgres drivers (postgres.js under drizzle) don't convert
+  // a Date placed directly in a template.
+  await db.delete(sessions).where(and(eq(sessions.userId, userId), lt(sessions.expiresAt, now)));
   return { token, expiresAt };
 }
 
